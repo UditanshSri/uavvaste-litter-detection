@@ -33,6 +33,12 @@ def coverage(masks):
     return float(masks.any(axis=0).mean() * 100) if len(masks) else 0.0
 
 
+def mask_polygons(mask, eps=1.0):
+    """Outline(s) of a mask as lists of [x, y] points, for drawing client-side."""
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [cv2.approxPolyDP(c, eps, True).reshape(-1, 2).tolist() for c in contours if len(c) >= 3]
+
+
 def draw_boxes(bgr, boxes):
     out = bgr.copy()
     for x1, y1, x2, y2 in boxes.astype(int):

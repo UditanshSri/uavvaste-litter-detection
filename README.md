@@ -5,6 +5,8 @@ Detects and segments litter in drone images from the [UAVVaste](https://github.c
 1. **Detection:** YOLOv8m, fine-tuned at 1024 px. Half of the box loss is replaced with a Normalized Wasserstein Distance (NWD) term, which copes better with the very small objects in this dataset.
 2. **Segmentation:** each detected box is passed to SAM 2 (Hiera Small) as a prompt, giving a pixel mask per object and the share of the frame covered by litter.
 
+**Public API:** `https://alleogo--uavvaste-litter-api-web.us-east.modal.run` (docs at [`/docs`](https://alleogo--uavvaste-litter-api-web.us-east.modal.run/docs)). It sleeps when idle, so the first request after a while takes a few extra seconds.
+
 ## Results
 
 Random 80/20 split (617 train / 155 val images, seed 42), COCO bbox metrics on the val split:
@@ -20,11 +22,13 @@ The paper used its own split, so this is not a strict like-for-like comparison. 
 ## Repo layout
 
 ```
-streamlit_app.py   web app (upload an image, see boxes, masks, coverage)
-api.py             REST API (FastAPI), same pipeline
-pipeline.py        model loading, inference and drawing, shared by both
-weights/best.pt    trained NWD-YOLOv8m weights
-notebooks/         Kaggle notebook: data prep, training, evaluation
+web/index.html         static web page (hosted on Vercel), calls the API
+api.py                 REST API (FastAPI)
+deploy/modal_app.py    runs api.py on Modal
+streamlit_app.py       alternative all-in-one Streamlit app
+pipeline.py            model loading, inference and drawing, shared by the above
+weights/best.pt        trained NWD-YOLOv8m weights
+notebooks/             Kaggle notebook: data prep, training, evaluation
 ```
 
 SAM 2 weights (`sam2_s.pt`) are downloaded automatically by Ultralytics the first time the app runs.
@@ -50,7 +54,14 @@ curl -F file=@image.jpg "http://localhost:8000/predict?conf=0.12"
  "detections": [{"box": [1022.5, 640.1, 1061.0, 671.3], "score": 0.81, "mask_area_px": 702}]}
 ```
 
-`box` is `[x1, y1, x2, y2]` in pixels. `conf` is the confidence threshold: lower finds more litter but adds false alarms. The default of 0.12 favours recall, because SAM can't recover an object the detector missed.
+Each detection also carries `polygons`, the mask outline(s) as `[x, y]` points. `box` is `[x1, y1, x2, y2]` in pixels. `conf` is the confidence threshold: lower finds more litter but adds false alarms. The default of 0.12 favours recall, because SAM can't recover an object the detector missed.
+
+To try the web page against a local API, serve `web/` (e.g. `python -m http.server -d web 5500`) and open `http://localhost:5500/?api=http://localhost:8000`.
+
+## Deploying
+
+- **API:** `pip install modal`, `modal token new`, then `modal deploy deploy/modal_app.py`. It prints the public URL; put it in `API_URL` in `web/index.html`.
+- **Web page:** import the repo in Vercel with **Root Directory** set to `web` and the **Other** framework preset. It's a single static file, so there's no build step.
 
 ## Training
 

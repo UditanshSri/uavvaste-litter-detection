@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UAVVaste litter detection</title>
+<style>
+  :root {
+    --bg: #f6f7f5; --fg: #1d2420; --muted: #5f6b64; --card: #ffffff;
+    --line: #dde2de; --accent: #2f7d4f; --error: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141816; --fg: #e6ebe7; --muted: #9aa69f; --card: #1d2320;
+      --line: #313a35; --accent: #5cc48a; --error: #f2b8b5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1000px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .controls { display: grid; gap: 14px; }
+  label { font-weight: 600; display: block; margin-bottom: 4px; }
+  .hint { color: var(--muted); font-size: 0.875rem; margin: 4px 0 0; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=file] { max-width: 100%; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { color: var(--muted); min-height: 1.5em; margin: 0; }
+  #status.error { color: var(--error); }
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .metric .v { font-size: 1.5rem; font-weight: 700; }
+  .metric .k { color: var(--muted); font-size: 0.875rem; }
+  .toggles { display: flex; gap: 16px; margin: 12px 0; flex-wrap: wrap; }
+  .toggles label { font-weight: 400; display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+  canvas { width: 100%; height: auto; border-radius: 6px; display: block; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  [hidden] { display: none !important; }
+  @media (max-width: 520px) { .metrics { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>UAVVaste litter detection</h1>
+  <p class="sub">Upload a drone photo. A YOLOv8m detector finds litter and SAM 2 outlines each piece.</p>
+
+  <div class="card controls">
+    <div>
+      <label for="file">Aerial image</label>
+      <input id="file" type="file" accept="image/*">
+    </div>
+    <div>
+      <label for="conf">Confidence threshold: <span id="confVal">0.12</span></label>
+      <input id="conf" type="range" min="0.05" max="0.9" step="0.01" value="0.12">
+      <p class="hint">Lower finds more litter but adds false alarms; higher is stricter but misses more.</p>
+    </div>
+    <div><button id="run" disabled>Detect litter</button></div>
+    <p id="status" aria-live="polite"></p>
+  </div>
+
+  <section id="results" hidden>
+    <div class="card metrics">
+      <div class="metric"><div class="v" id="mCount">-</div><div class="k">Detections</div></div>
+      <div class="metric"><div class="v" id="mCov">-</div><div class="k">Litter coverage</div></div>
+      <div class="metric"><div class="v" id="mConf">-</div><div class="k">Mean confidence</div></div>
+    </div>
+    <div class="card">
+      <div class="toggles">
+        <label><input type="checkbox" id="showMasks" checked> Masks</label>
+        <label><input type="checkbox" id="showBoxes" checked> Boxes</label>
+      </div>
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="card table-wrap" id="tableCard">
+      <table>
+        <thead><tr><th>#</th><th>Score</th><th>x1</th><th>y1</th><th>x2</th><th>y2</th><th>Mask area (px)</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+// Modal deployment of api.py (deploy/modal_app.py); ?api=http://127.0.0.1:8000 to point at a local server
+const API_URL = new URLSearchParams(location.search).get("api") || "https://alleogo--uavvaste-litter-api-web.us-east.modal.run";
+// big drone frames are shrunk before upload; YOLO runs at 1024 px anyway
+const MAX_SIDE = 2048;
+
+const $ = (id) => document.getElementById(id);
+let image = null;   // downscaled ImageBitmap/canvas that was sent
+let result = null;
+
+$("conf").addEventListener("input", (e) => { $("confVal").textContent = Number(e.target.value).toFixed(2); });
+$("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  $("run").disabled = !f;
+  if (f) run();
+});
+$("run").addEventListener("click", run);
+$("showMasks").addEventListener("change", draw);
+$("showBoxes").addEventListener("change", draw);
+
+function setStatus(text, isError = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", isError);
+}
+
+async function loadScaled(file) {
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * s);
+  c.height = Math.round(bmp.height * s);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return c;
+}
+
+async function run() {
+  const f = $("file").files[0];
+  if (!f) return;
+  $("run").disabled = true;
+  const slow = setTimeout(() => setStatus("Still working. If the server was asleep it takes about a minute to wake up."), 8000);
+  try {
+    setStatus("Preparing image...");
+    image = await loadScaled(f);
+    const blob = await new Promise((r) => image.toBlob(r, "image/jpeg", 0.92));
+    const form = new FormData();
+    form.append("file", blob, "image.jpg");
+
+    setStatus("Running detection and segmentation...");
+    const conf = $("conf").value;
+    const res = await fetch(`${API_URL}/predict?conf=${conf}`, { method: "POST", body: form });
+    if (!res.ok) throw new Error(`Server returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    result = await res.json();
+    show();
+    setStatus(result.count ? "" : "No litter found at this threshold. Try lowering it.");
+  } catch (err) {
+    setStatus(`Something went wrong: ${err.message}`, true);
+  } finally {
+    clearTimeout(slow);
+    $("run").disabled = false;
+  }
+}
+
+function show() {
+  const d = result.detections;
+  $("results").hidden = false;
+  $("mCount").textContent = result.count;
+  $("mCov").textContent = `${result.coverage_pct.toFixed(2)}%`;
+  $("mConf").textContent = d.length ? (d.reduce((a, x) => a + x.score, 0) / d.length).toFixed(2) : "-";
+
+  $("tableCard").hidden = !d.length;
+  $("rows").innerHTML = d.map((x, i) =>
+    `<tr><td>${i + 1}</td><td>${x.score.toFixed(3)}</td>${x.box.map((v) => `<td>${Math.round(v)}</td>`).join("")}<td>${x.mask_area_px}</td></tr>`
+  ).join("");
+  draw();
+}
+
+function draw() {
+  if (!image || !result) return;
+  const c = $("canvas");
+  c.width = image.width;
+  c.height = image.height;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  const lw = Math.max(2, image.width / 600);
+
+  if ($("showMasks").checked) {
+    for (const det of result.detections) {
+      for (const poly of det.polygons) {
+        ctx.beginPath();
+        poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+        ctx.closePath();
+        ctx.fillStyle = "rgba(0, 120, 255, 0.45)";
+        ctx.fill();
+        ctx.strokeStyle = "#00e05a";
+        ctx.lineWidth = lw;
+        ctx.stroke();
+      }
+    }
+  }
+  if ($("showBoxes").checked) {
+    ctx.strokeStyle = "#ff3b30";
+    ctx.lineWidth = lw;
+    for (const { box: [x1, y1, x2, y2] } of result.detections) ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  }
+}
+</script>
+</body>
+</html>
