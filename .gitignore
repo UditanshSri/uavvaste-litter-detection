@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.DS_Store
+*.log
+# downloaded at runtime
+sam2_s.pt
+yolov8m.pt
